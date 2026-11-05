@@ -1,0 +1,72 @@
+name: Proactive Secure Deployment to Azure
+
+on:
+  push:
+    branches: [ "main" ]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-and-secure:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    # 1. Build the local container image from your Dockerfile
+    - name: Build Local Container Image
+      run: |
+        docker build -t localapp:test .
+
+    # 2. Run Trivy vulnerability scan and output a JSON report
+    - name: Run Trivy Vulnerability Scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'localapp:test'
+        format: 'json'
+        output: 'trivy-results.json'
+        severity: 'HIGH,CRITICAL'
+
+    # 3. Bash Quality Gate: Inspect scan results and break build if risks exist
+    - name: Enforce Security Guardrail via Bash
+      run: |
+        echo "[*] Parsing security scan report via Bash..."
+        
+        # Ensure jq is installed to read the report file
+        if ! command -v jq &> /dev/null; then
+          sudo apt-get update && sudo apt-get install -y jq
+        fi
+        
+        # Count total High and Critical vulnerabilities found
+        VULN_COUNT=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity == "HIGH" or .Severity == "CRITICAL")] | length' trivy-results.json)
+        
+        echo "[*] Total High/Critical vulnerabilities discovered: $VULN_COUNT"
+        
+        if [ "$VULN_COUNT" -gt 0 ]; then
+          echo "================================================================"
+          echo "[-] SECURITY GATE FAILED: Unacceptable vulnerabilities detected!"
+          echo "[-] Proactively blocking deployment to Azure App Services."
+          echo "================================================================"
+          exit 1
+        else
+          echo "[✓] SECURITY GATE PASSED: Image matches risk tolerance thresholds."
+        fi
+
+    # 4. Log in safely to Azure using OpenID Connect (OIDC) keys
+    - name: Authenticate to Azure
+      uses: azure/login@v2
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    # 5. Push and Deploy (This will ONLY happen if the step 3 gate didn't break)
+    - name: Deploy Secure Container to Azure Web App
+      uses: azure/webapps-deploy@v3
+      with:
+        app-name: 'my-secure-production-app'
+        images: 'localapp:test'
+
+
